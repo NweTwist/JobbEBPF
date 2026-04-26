@@ -8,9 +8,11 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "xdp_count.skel.h"
+#include "../common/keep_attached.h"
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
     struct xdp_count_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
@@ -62,6 +64,7 @@ int main(void)
 
     /* Очистка XDP */
     bpf_xdp_detach(ifindex, 0, NULL);
+    kbpf_wait_if_keep_attached(keep_attached);
     xdp_count_bpf__destroy(skel);
     printf("  [CLEANUP] OK\n");
     return 0;

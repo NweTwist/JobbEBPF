@@ -8,6 +8,7 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "netfilter.skel.h"
+#include "../common/keep_attached.h"
 
 /* PF_INET = 2, NF_INET_LOCAL_OUT = 3 */
 #ifndef NFPROTO_IPV4
@@ -24,8 +25,9 @@
 #define HAS_LIBBPF_NETFILTER_API 0
 #endif
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
 #if HAS_LIBBPF_NETFILTER_API
     struct netfilter_bpf *skel;
     struct bpf_link *link = NULL;
@@ -81,6 +83,7 @@ int main(void)
 #endif
 
 #if HAS_LIBBPF_NETFILTER_API
+    kbpf_wait_if_keep_attached(keep_attached);
     netfilter_bpf__destroy(skel);
 #endif
     printf("  [CLEANUP] OK\n");

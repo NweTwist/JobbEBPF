@@ -10,9 +10,11 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "cgroup_sock_addr.skel.h"
+#include "../common/keep_attached.h"
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
     struct cgroup_sock_addr_bpf *skel;
     struct bpf_link *link = NULL;
     int cg_fd = -1;
@@ -73,6 +75,7 @@ int main(void)
     /* Cleanup */
     bpf_link__destroy(link);
     close(cg_fd);
+    kbpf_wait_if_keep_attached(keep_attached);
     cgroup_sock_addr_bpf__destroy(skel);
     printf("  [CLEANUP] OK\n");
     return 0;

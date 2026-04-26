@@ -8,9 +8,11 @@
 #include <bpf/bpf.h>
 #include "target.skel.h"
 #include "ext_replace.skel.h"
+#include "../common/keep_attached.h"
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
     struct target_bpf *target_skel = NULL;
     struct ext_replace_bpf *ext_skel = NULL;
     struct bpf_link *ext_link = NULL;
@@ -107,6 +109,7 @@ int main(void)
     bpf_xdp_detach(lo_ifindex, 0, NULL);
     bpf_link__destroy(ext_link);
     ext_replace_bpf__destroy(ext_skel);
+    kbpf_wait_if_keep_attached(keep_attached);
     target_bpf__destroy(target_skel);
     printf("  [CLEANUP] OK\n");
     return 0;

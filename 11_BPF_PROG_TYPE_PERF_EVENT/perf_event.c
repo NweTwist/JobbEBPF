@@ -9,6 +9,7 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "perf_event.skel.h"
+#include "../common/keep_attached.h"
 
 static int perf_event_open(struct perf_event_attr *attr, pid_t pid,
                            int cpu, int group_fd, unsigned long flags)
@@ -16,8 +17,9 @@ static int perf_event_open(struct perf_event_attr *attr, pid_t pid,
     return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
     struct perf_event_bpf *skel;
     struct bpf_link *link = NULL;
     __u32 key = 0;
@@ -77,6 +79,7 @@ int main(void)
     }
 
     bpf_link__destroy(link);
+    kbpf_wait_if_keep_attached(keep_attached);
     perf_event_bpf__destroy(skel);
     printf("  [CLEANUP] OK\n");
     return 0;

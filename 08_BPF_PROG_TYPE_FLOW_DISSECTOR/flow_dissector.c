@@ -8,9 +8,11 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "flow_dissector.skel.h"
+#include "../common/keep_attached.h"
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
     struct flow_dissector_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
@@ -70,6 +72,7 @@ int main(void)
     /* Очистка */
     if (link_fd >= 0)
         close(link_fd);
+    kbpf_wait_if_keep_attached(keep_attached);
     flow_dissector_bpf__destroy(skel);
     printf("  [CLEANUP] OK\n");
     return 0;

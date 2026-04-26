@@ -8,9 +8,11 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "tp_openat.skel.h"
+#include "../common/keep_attached.h"
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
     struct tp_openat_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
@@ -56,6 +58,7 @@ int main(void)
         return 1;
     }
 
+    kbpf_wait_if_keep_attached(keep_attached);
     tp_openat_bpf__destroy(skel);
     printf("  [CLEANUP] OK\n");
     return 0;

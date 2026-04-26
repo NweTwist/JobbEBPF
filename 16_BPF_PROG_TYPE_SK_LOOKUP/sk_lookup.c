@@ -11,11 +11,13 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "sk_lookup.skel.h"
+#include "../common/keep_attached.h"
 
 #define TEST_PORT 19876
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
     struct sk_lookup_bpf *skel;
     struct bpf_link *link = NULL;
     __u32 key = 0;
@@ -91,6 +93,7 @@ out:
     if (cli >= 0) close(cli);
     if (srv >= 0) close(srv);
     if (link) bpf_link__destroy(link);
+    kbpf_wait_if_keep_attached(keep_attached);
     sk_lookup_bpf__destroy(skel);
     printf("  [CLEANUP] OK\n");
     return 0;

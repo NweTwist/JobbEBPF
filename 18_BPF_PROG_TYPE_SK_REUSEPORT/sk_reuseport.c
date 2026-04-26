@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -13,13 +14,44 @@
 
 #define TEST_PORT 19877
 
-int main(void)
+static volatile sig_atomic_t running = 1;
+
+static void sig_handler(int sig)
+{
+    (void)sig;
+    running = 0;
+}
+
+static void print_usage(const char *prog)
+{
+    printf("Usage: %s [--keep-attached|-k]\n", prog);
+    printf("  --keep-attached, -k  Не закрывать сокеты автоматически и держать BPF прикреплённой до SIGINT/SIGTERM\n");
+}
+
+int main(int argc, char **argv)
 {
     struct sk_reuseport_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
     int err, prog_fd;
     int s1 = -1, s2 = -1, cli = -1;
+    int keep_attached = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--keep-attached") == 0 || strcmp(argv[i], "-k") == 0) {
+            keep_attached = 1;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
+    signal(SIGINT, sig_handler);
+    signal(SIGTERM, sig_handler);
 
     /* Загрузка */
     skel = sk_reuseport_bpf__open_and_load();
@@ -88,6 +120,13 @@ int main(void)
         printf("  [VERIFY] PASS (counter=%llu)\n", (unsigned long long)val);
     } else {
         printf("  [VERIFY] FAIL (counter=%llu, err=%d)\n", (unsigned long long)val, err);
+    }
+
+    if (keep_attached) {
+        printf("  [PERSIST] Режим удержания включён. Программа остаётся прикреплённой, пока процесс жив.\n");
+        printf("  [PERSIST] Нажмите Ctrl+C для открепления и завершения.\n");
+        while (running)
+            sleep(1);
     }
 
 out:

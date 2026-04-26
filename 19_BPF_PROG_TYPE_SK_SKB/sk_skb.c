@@ -9,6 +9,7 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "sk_skb.skel.h"
+#include "../common/keep_attached.h"
 
 #define TEST_PORT 18919
 
@@ -48,8 +49,9 @@ static int create_tcp_pair(int *cli_fd, int *acc_fd)
     return 0;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
     struct sk_skb_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
@@ -119,6 +121,7 @@ out:
     bpf_prog_detach(sockmap_fd, BPF_SK_SKB_STREAM_VERDICT);
     if (cli_fd >= 0) close(cli_fd);
     if (acc_fd >= 0) close(acc_fd);
+    kbpf_wait_if_keep_attached(keep_attached);
     sk_skb_bpf__destroy(skel);
     printf("  [CLEANUP] OK\n");
     return 0;

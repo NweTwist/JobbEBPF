@@ -8,6 +8,7 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "sched_act.skel.h"
+#include "../common/keep_attached.h"
 
 #define PIN_PATH "/sys/fs/bpf/_test_sched_act"
 
@@ -16,12 +17,14 @@ static void cleanup(struct sched_act_bpf *skel)
     system("tc filter del dev lo egress 2>/dev/null");
     system("tc qdisc del dev lo clsact 2>/dev/null");
     unlink(PIN_PATH);
+    kbpf_wait_if_keep_attached(keep_attached);
     if (skel)
         sched_act_bpf__destroy(skel);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int keep_attached = kbpf_scan_keep_attached(argc, argv);
     struct sched_act_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
