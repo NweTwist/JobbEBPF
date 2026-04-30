@@ -76,7 +76,7 @@ pub fn spawn_run_action_selected(
 
         let res = match action {
             RunAction::Auto => run_pipeline(&tx, &stop_flag, index, &program, &config),
-            _ => run_manual_action(&tx, &stop_flag, index, &program, action),
+            _ => run_manual_action(&tx, &stop_flag, index, &program, &config, action),
         };
 
         handle_run_result(&tx, index, &program, action, res);
@@ -271,6 +271,7 @@ fn run_manual_action(
     stop_flag: &AtomicBool,
     index: usize,
     program: &Program,
+    config: &RunConfig,
     action: RunAction,
 ) -> anyhow::Result<()> {
     let scripts = Scripts::detect(&program.dir);
@@ -666,9 +667,7 @@ fn run_shell_and_stream(
         .stderr(Stdio::piped());
     unsafe {
         cmd.pre_exec(|| {
-            unsafe {
-                libc::setpgid(0, 0);
-            }
+            libc::setpgid(0, 0);
             Ok(())
         });
     }
@@ -807,9 +806,7 @@ pub fn spawn_global_trace(
             .stderr(Stdio::piped());
         unsafe {
             cmd.pre_exec(|| {
-                unsafe {
-                    libc::setpgid(0, 0);
-                }
+                libc::setpgid(0, 0);
                 Ok(())
             });
         }
