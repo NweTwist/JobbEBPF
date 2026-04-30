@@ -36,7 +36,6 @@ pub enum RunnerEvent {
 
 #[derive(Clone, Debug)]
 pub struct RunConfig {
-    pub trace_cmd: String,
     pub artifacts_dir: PathBuf,
 }
 

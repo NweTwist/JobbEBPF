@@ -177,7 +177,6 @@ impl App {
         self.stop_flag.store(false, Ordering::Relaxed);
         let programs: Vec<Program> = self.entries.iter().map(|e| e.program.clone()).collect();
         let config = runner::RunConfig {
-            trace_cmd: self.trace_cmd.clone(),
             artifacts_dir: self.artifacts_dir.clone(),
         };
         runner::spawn_run_all(self.tx.clone(), self.stop_flag.clone(), programs, config);
@@ -191,7 +190,6 @@ impl App {
         let index = self.selected;
         let program = self.entries[index].program.clone();
         let config = runner::RunConfig {
-            trace_cmd: self.trace_cmd.clone(),
             artifacts_dir: self.artifacts_dir.clone(),
         };
         runner::spawn_run_action_selected(
