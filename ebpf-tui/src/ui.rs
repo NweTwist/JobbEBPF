@@ -45,7 +45,6 @@ pub struct ProgramEntry {
     pub program: Program,
     pub status: runner::ProgramStatus,
     pub attached: bool,
-    pub trace_active: bool,
 }
 
 pub struct App {
@@ -57,6 +56,8 @@ pub struct App {
     pub artifacts_dir: PathBuf,
     pub tx: mpsc::Sender<runner::RunnerEvent>,
     pub stop_flag: Arc<AtomicBool>,
+    pub trace_stop_flag: Arc<AtomicBool>,
+    pub trace_running: bool,
 }
 
 impl App {
@@ -66,6 +67,7 @@ impl App {
         trace_cmd: String,
         artifacts_dir: PathBuf,
         tx: mpsc::Sender<runner::RunnerEvent>,
+        trace_stop_flag: Arc<AtomicBool>,
     ) -> Self {
         let entries = programs
             .into_iter()
@@ -73,19 +75,20 @@ impl App {
                 program: p,
                 status: runner::ProgramStatus::Idle,
                 attached: false,
-                trace_active: false,
             })
             .collect();
 
         Self {
             entries,
             selected: 0,
-            last_message: "Ready. Keys: r auto, b build, l load, x trace on, z trace off, t test, u unload, s stop".to_string(),
+            last_message: "Ready. Keys: r auto, b build, l load, t test, u unload, s stop".to_string(),
             status_lines: VecDeque::new(),
             trace_cmd,
             artifacts_dir,
             tx,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            trace_stop_flag,
+            trace_running: true,
         }
     }
 
@@ -126,17 +129,13 @@ impl App {
                     .unwrap_or_else(|| "module".to_string());
                 self.push_status_line(format!("{} | {}", prefix, line));
             }
-            runner::RunnerEvent::ModuleState {
-                index,
-                attached,
-                trace_active,
-            } => {
+            runner::RunnerEvent::TraceLine { line } => {
+                self.push_status_line(format!("trace | {}", line));
+            }
+            runner::RunnerEvent::ModuleState { index, attached } => {
                 if let Some(entry) = self.entries.get_mut(index) {
                     if let Some(v) = attached {
                         entry.attached = v;
-                    }
-                    if let Some(v) = trace_active {
-                        entry.trace_active = v;
                     }
                 }
             }
@@ -145,6 +144,7 @@ impl App {
 
     pub fn request_stop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+        self.trace_stop_flag.store(true, Ordering::Relaxed);
     }
 
     pub fn stop_runs(&mut self) {
@@ -163,14 +163,6 @@ impl App {
 
     pub fn load_selected(&mut self) {
         self.run_action(runner::RunAction::Load);
-    }
-
-    pub fn start_trace_selected(&mut self) {
-        self.run_action(runner::RunAction::TraceStart);
-    }
-
-    pub fn stop_trace_selected(&mut self) {
-        self.run_action(runner::RunAction::TraceStop);
     }
 
     pub fn test_selected(&mut self) {
@@ -291,35 +283,27 @@ pub fn render(frame: &mut Frame, app: &App) {
             "↑/↓",
             Style::default().add_modifier(Modifier::BOLD),
         ), Span::raw(" select  ")]),
-        Line::from(vec![Span::styled(
-            "r",
-            Style::default().add_modifier(Modifier::BOLD),
-        ), Span::raw(" auto  "), Span::styled(
-            "b",
-            Style::default().add_modifier(Modifier::BOLD),
-        ), Span::raw(" build  "), Span::styled(
-            "l",
-            Style::default().add_modifier(Modifier::BOLD),
-        ), Span::raw(" load  "), Span::styled(
-            "x/z",
-            Style::default().add_modifier(Modifier::BOLD),
-        ), Span::raw(" trace on/off")]),
-        Line::from(vec![Span::styled(
-            "t",
-            Style::default().add_modifier(Modifier::BOLD),
-        ), Span::raw(" test  "), Span::styled(
-            "u",
-            Style::default().add_modifier(Modifier::BOLD),
-        ), Span::raw(" unload  "), Span::styled(
-            "a",
-            Style::default().add_modifier(Modifier::BOLD),
-        ), Span::raw(" run all auto  "), Span::styled(
-            "s",
-            Style::default().add_modifier(Modifier::BOLD),
-        ), Span::raw(" stop run  "), Span::styled(
-            "q",
-            Style::default().add_modifier(Modifier::BOLD),
-        ), Span::raw(" quit")]),
+        Line::from(vec![
+            Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" auto  "),
+            Span::styled("b", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" build  "),
+            Span::styled("l", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" load  "),
+            Span::styled("t", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" test"),
+        ]),
+        Line::from(vec![
+            Span::styled("u", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" unload  "),
+            Span::styled("a", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" run all auto  "),
+            Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" stop run  "),
+            Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" quit"),
+        ]),
+        Line::from(vec![Span::raw("Trace: always on (trace_global.log)")]),
         Line::from(vec![Span::raw(
             "Logs are stored in artifacts/<program>/ (PMI: pmi.txt, plus status.log/run_report.md).",
         )]),
@@ -357,7 +341,7 @@ fn selected_program_details(app: &App) -> Vec<Line<'static>> {
             Span::raw(if entry.attached { "yes" } else { "no" }),
             Span::raw("    "),
             Span::styled("Trace: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(if entry.trace_active { "on" } else { "off" }),
+            Span::raw(if app.trace_running { "on" } else { "off" }),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -372,7 +356,6 @@ fn status_progress(status: &runner::ProgramStatus) -> (u8, Color) {
         runner::ProgramStatus::Idle => (0, Color::Gray),
         runner::ProgramStatus::Running("build") => (25, Color::Yellow),
         runner::ProgramStatus::Running("load") => (45, Color::Yellow),
-        runner::ProgramStatus::Running("trace+test") => (75, Color::Yellow),
         runner::ProgramStatus::Running("test") => (75, Color::Yellow),
         runner::ProgramStatus::Running("unload") => (90, Color::Yellow),
         runner::ProgramStatus::Running("trace") => (60, Color::Yellow),
