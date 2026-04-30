@@ -63,10 +63,8 @@ fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let trace_stop_flag = Arc::new(AtomicBool::new(false));
     runner::spawn_global_trace(
         tx.clone(),
-        trace_stop_flag.clone(),
         trace_cmd.clone(),
         artifacts_dir.clone(),
     );
@@ -74,10 +72,8 @@ fn main() -> anyhow::Result<()> {
     let mut app = ui::App::new(
         repo_root,
         programs,
-        trace_cmd,
         artifacts_dir,
         tx,
-        trace_stop_flag,
     );
 
     let res = run_app(&mut terminal, &mut app, rx);

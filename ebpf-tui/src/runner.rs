@@ -773,7 +773,6 @@ fn run_shell_and_stream(
 
 pub fn spawn_global_trace(
     tx: mpsc::Sender<RunnerEvent>,
-    stop_flag: Arc<AtomicBool>,
     trace_cmd: String,
     artifacts_dir: PathBuf,
 ) {
@@ -877,18 +876,7 @@ pub fn spawn_global_trace(
             }
         });
 
-        loop {
-            if stop_flag.load(Ordering::Relaxed) {
-                kill_process_group(pid);
-                break;
-            }
-
-            if let Ok(Some(_)) = child.try_wait() {
-                break;
-            }
-
-            thread::sleep(std::time::Duration::from_millis(100));
-        }
+        let _ = child.wait();
 
         let _ = tx.send(RunnerEvent::Message {
             text: "trace stopped".to_string(),

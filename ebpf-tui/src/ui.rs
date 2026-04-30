@@ -52,22 +52,17 @@ pub struct App {
     pub selected: usize,
     pub last_message: String,
     pub status_lines: VecDeque<String>,
-    pub trace_cmd: String,
     pub artifacts_dir: PathBuf,
     pub tx: mpsc::Sender<runner::RunnerEvent>,
     pub stop_flag: Arc<AtomicBool>,
-    pub trace_stop_flag: Arc<AtomicBool>,
-    pub trace_running: bool,
 }
 
 impl App {
     pub fn new(
         _repo_root: PathBuf,
         programs: Vec<Program>,
-        trace_cmd: String,
         artifacts_dir: PathBuf,
         tx: mpsc::Sender<runner::RunnerEvent>,
-        trace_stop_flag: Arc<AtomicBool>,
     ) -> Self {
         let entries = programs
             .into_iter()
@@ -83,12 +78,9 @@ impl App {
             selected: 0,
             last_message: "Ready. Keys: r auto, b build, l load, t test, u unload, s stop".to_string(),
             status_lines: VecDeque::new(),
-            trace_cmd,
             artifacts_dir,
             tx,
             stop_flag: Arc::new(AtomicBool::new(false)),
-            trace_stop_flag,
-            trace_running: true,
         }
     }
 
@@ -144,7 +136,6 @@ impl App {
 
     pub fn request_stop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
-        self.trace_stop_flag.store(true, Ordering::Relaxed);
     }
 
     pub fn stop_runs(&mut self) {
@@ -339,7 +330,7 @@ fn selected_program_details(app: &App) -> Vec<Line<'static>> {
             Span::raw(if entry.attached { "yes" } else { "no" }),
             Span::raw("    "),
             Span::styled("Trace: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(if app.trace_running { "on" } else { "off" }),
+            Span::raw("on"),
         ]),
         Line::from(""),
         Line::from(vec![
