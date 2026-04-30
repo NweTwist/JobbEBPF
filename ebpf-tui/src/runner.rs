@@ -4,12 +4,13 @@ use chrono::Local;
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc,
-        Arc,
+        Arc, Mutex,
     },
     thread,
 };
@@ -434,90 +435,12 @@ fn run_manual_action(
     Ok(())
 }
 
-fn start_background_trace(
-    tx: &mpsc::Sender<RunnerEvent>,
-    stop_flag: &AtomicBool,
-    index: usize,
-    current_dir: &Path,
-    config: &RunConfig,
-    state: &ModuleStateFiles,
-) -> anyhow::Result<()> {
-    tx.send(RunnerEvent::Status {
-        index,
-        status: ProgramStatus::Running("trace"),
-    })
-    .ok();
-
-    let trace_log = state.trace_log.display();
-    let pid_file = state.trace_pid.display();
-    let cmd = format!(
-        "rm -f '{pid}'; ({trace}) >> '{log}' 2>/dev/null & echo $! > '{pid}'",
-        pid = pid_file,
-        trace = config.trace_cmd,
-        log = trace_log,
-    );
-
-    let result = run_shell_and_stream(tx, stop_flag, index, current_dir, &cmd, Some("trace"))?;
-    fs::write(&state.trace_start_log, result.output.as_bytes())
-        .with_context(|| format!("write {}", state.trace_start_log.display()))?;
-
-    if !result.success {
-        return Err(anyhow!(
-            "trace-start failed (see {})",
-            state.trace_start_log.display()
-        ));
+fn kill_process_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGTERM);
     }
-
-    tx.send(RunnerEvent::Message {
-        text: format!("trace started -> {}", state.trace_log.display()),
-    })
-    .ok();
-
-    Ok(())
 }
 
-fn stop_background_trace(
-    tx: &mpsc::Sender<RunnerEvent>,
-    stop_flag: &AtomicBool,
-    index: usize,
-    current_dir: &Path,
-    state: &ModuleStateFiles,
-    stop_log: &Path,
-) -> anyhow::Result<()> {
-    tx.send(RunnerEvent::Status {
-        index,
-        status: ProgramStatus::Running("trace-stop"),
-    })
-    .ok();
-
-    let pid_file = state.trace_pid.display();
-    let cmd = format!(
-        "if [ -f '{pid}' ]; then kill \"$(cat '{pid}')\" 2>/dev/null || true; rm -f '{pid}'; fi",
-        pid = pid_file,
-    );
-
-    let result = run_shell_and_stream(
-        tx,
-        stop_flag,
-        index,
-        current_dir,
-        &cmd,
-        Some("trace-stop"),
-    )?;
-    fs::write(stop_log, result.output.as_bytes())
-        .with_context(|| format!("write {}", stop_log.display()))?;
-
-    if !result.success {
-        return Err(anyhow!("trace-stop failed (see {})", stop_log.display()));
-    }
-
-    tx.send(RunnerEvent::Message {
-        text: "trace stopped".to_string(),
-    })
-    .ok();
-
-    Ok(())
-}
 
 fn send_log_line(tx: &mpsc::Sender<RunnerEvent>, index: usize, line: String) {
     let _ = tx.send(RunnerEvent::LogLine { index, line });
@@ -809,6 +732,12 @@ fn run_shell_and_stream(
         .current_dir(current_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .pre_exec(|| {
+            unsafe {
+                libc::setpgid(0, 0);
+            }
+            Ok(())
+        })
         .spawn()
         .with_context(|| format!("spawn command: {}", command))?;
 
@@ -854,6 +783,7 @@ fn run_shell_and_stream(
 
     let mut collected = String::new();
     let mut killed_by_stop = false;
+    let child_pid = child.id();
     let success;
 
     loop {
@@ -872,7 +802,7 @@ fn run_shell_and_stream(
 
         if stop_flag.load(Ordering::Relaxed) {
             killed_by_stop = true;
-            let _ = child.kill();
+            kill_process_group(child_pid);
         }
 
         if let Some(status) = child.try_wait().context("wait command status")? {
@@ -939,6 +869,153 @@ fn start_trace(trace_cmd: &str, out_dir: &Path) -> anyhow::Result<Child> {
 fn stop_trace(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn start_background_trace(
+    tx: &mpsc::Sender<RunnerEvent>,
+    stop_flag: &AtomicBool,
+    index: usize,
+    current_dir: &Path,
+    config: &RunConfig,
+    state: &ModuleStateFiles,
+) -> anyhow::Result<()> {
+    tx.send(RunnerEvent::Status {
+        index,
+        status: ProgramStatus::Running("trace"),
+    })
+    .ok();
+
+    if state.trace_pid.exists() {
+        let _ = stop_background_trace(
+            tx,
+            stop_flag,
+            index,
+            current_dir,
+            state,
+            &state.trace_start_log,
+        );
+    }
+
+    let log_file = fs::File::create(&state.trace_log)
+        .with_context(|| format!("create {}", state.trace_log.display()))?;
+    let log_writer = Arc::new(Mutex::new(std::io::BufWriter::new(log_file)));
+
+    let mut child = Command::new("bash")
+        .arg("-lc")
+        .arg(&config.trace_cmd)
+        .current_dir(current_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .pre_exec(|| {
+            unsafe {
+                libc::setpgid(0, 0);
+            }
+            Ok(())
+        })
+        .spawn()
+        .with_context(|| format!("start trace via: {}", config.trace_cmd))?;
+
+    let pid = child.id();
+    fs::write(&state.trace_pid, pid.to_string())
+        .with_context(|| format!("write {}", state.trace_pid.display()))?;
+
+    let stdout = child.stdout.take().context("capture trace stdout")?;
+    let stderr = child.stderr.take().context("capture trace stderr")?;
+
+    let tx_out = tx.clone();
+    let log_out = log_writer.clone();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    send_log_line(&tx_out, index, format_line_for_status(Some("trace"), trimmed));
+                    if let Ok(mut w) = log_out.lock() {
+                        let _ = writeln!(w, "{}", trimmed);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let tx_err = tx.clone();
+    let log_err = log_writer.clone();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    let rendered = format!("[stderr] {}", trimmed);
+                    send_log_line(&tx_err, index, format_line_for_status(Some("trace"), &rendered));
+                    if let Ok(mut w) = log_err.lock() {
+                        let _ = writeln!(w, "{}", rendered);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    fs::write(
+        &state.trace_start_log,
+        format!("trace start: {}\n", config.trace_cmd),
+    )
+    .with_context(|| format!("write {}", state.trace_start_log.display()))?;
+
+    tx.send(RunnerEvent::Message {
+        text: format!("trace started -> {}", state.trace_log.display()),
+    })
+    .ok();
+
+    Ok(())
+}
+
+fn stop_background_trace(
+    tx: &mpsc::Sender<RunnerEvent>,
+    _stop_flag: &AtomicBool,
+    index: usize,
+    _current_dir: &Path,
+    state: &ModuleStateFiles,
+    stop_log: &Path,
+) -> anyhow::Result<()> {
+    tx.send(RunnerEvent::Status {
+        index,
+        status: ProgramStatus::Running("trace-stop"),
+    })
+    .ok();
+
+    if let Ok(pid_raw) = fs::read_to_string(&state.trace_pid) {
+        if let Ok(pid) = pid_raw.trim().parse::<u32>() {
+            kill_process_group(pid);
+        }
+    }
+
+    if state.trace_pid.exists() {
+        let _ = fs::remove_file(&state.trace_pid);
+    }
+
+    fs::write(stop_log, b"trace stop requested\n")
+        .with_context(|| format!("write {}", stop_log.display()))?;
+
+    tx.send(RunnerEvent::Message {
+        text: "trace stopped".to_string(),
+    })
+    .ok();
+
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
