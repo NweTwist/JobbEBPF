@@ -12,7 +12,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
     path::PathBuf,
-    sync::{mpsc, Arc, atomic::AtomicBool},
+    sync::mpsc,
     time::Duration,
 };
 

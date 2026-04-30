@@ -823,7 +823,6 @@ pub fn spawn_global_trace(
             text: format!("trace started -> {}", log_path.display()),
         });
 
-        let pid = child.id();
         let stdout = match child.stdout.take() {
             Some(s) => s,
             None => return,
