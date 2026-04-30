@@ -7,16 +7,29 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <linux/if_ether.h>
+#include <signal.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "socket_filter.skel.h"
+
+static volatile sig_atomic_t stop;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    stop = 1;
+}
 
 int main(void)
 {
     struct socket_filter_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
+    __u64 prev_val = 0;
     int err, raw_sock = -1;
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Загрузка */
     skel = socket_filter_bpf__open_and_load();
@@ -59,6 +72,20 @@ int main(void)
         close(raw_sock);
         socket_filter_bpf__destroy(skel);
         return 1;
+    }
+
+    printf("  [RUN] Программа активна. Нажмите Ctrl+C для остановки.\n");
+    while (!stop) {
+        err = bpf_map__lookup_elem(skel->maps.filter_count, &key, sizeof(key), &val, sizeof(val), 0);
+        if (err == 0) {
+            unsigned long long delta = (unsigned long long)(val - prev_val);
+            printf("  [RT] filter_count=%llu (+%llu)\n",
+                   (unsigned long long)val, delta);
+            prev_val = val;
+        } else {
+            printf("  [RT] WARN: не удалось прочитать счётчик (%d)\n", err);
+        }
+        sleep(1);
     }
 
     close(raw_sock);

@@ -5,16 +5,30 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "flow_dissector.skel.h"
+
+static volatile sig_atomic_t stop;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    stop = 1;
+}
 
 int main(void)
 {
     struct flow_dissector_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
+    __u64 prev_val = 0;
     int err, prog_fd, netns_fd, link_fd = -1;
+    int attach_target_fd = -1;
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Загрузка */
     skel = flow_dissector_bpf__open_and_load();
@@ -49,10 +63,14 @@ int main(void)
                 printf("  [CLEANUP] OK\n");
                 return 0;
             }
+            attach_target_fd = netns_fd;
+        } else {
+            attach_target_fd = 0;
         }
+    } else {
+        attach_target_fd = netns_fd;
     }
     printf("  [ATTACH] OK\n");
-    close(netns_fd);
 
     /* Генерация трафика */
     system("ping -c 2 127.0.0.1 > /dev/null 2>&1");
@@ -67,9 +85,27 @@ int main(void)
                (unsigned long long)val);
     }
 
+    printf("  [RUN] Программа активна. Нажмите Ctrl+C для остановки.\n");
+    while (!stop) {
+        err = bpf_map__lookup_elem(skel->maps.dissector_count, &key, sizeof(key), &val, sizeof(val), 0);
+        if (err == 0) {
+            unsigned long long delta = (unsigned long long)(val - prev_val);
+            printf("  [RT] dissector_count=%llu (+%llu)\n",
+                   (unsigned long long)val, delta);
+            prev_val = val;
+        } else {
+            printf("  [RT] WARN: не удалось прочитать счётчик (%d)\n", err);
+        }
+        sleep(1);
+    }
+
     /* Очистка */
-    if (link_fd >= 0)
+    if (link_fd >= 0) {
         close(link_fd);
+    } else if (attach_target_fd >= 0) {
+        bpf_prog_detach2(prog_fd, attach_target_fd, BPF_FLOW_DISSECTOR);
+    }
+    close(netns_fd);
     flow_dissector_bpf__destroy(skel);
     printf("  [CLEANUP] OK\n");
     return 0;

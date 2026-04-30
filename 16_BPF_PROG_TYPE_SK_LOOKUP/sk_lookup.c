@@ -8,11 +8,20 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "sk_lookup.skel.h"
 
 #define TEST_PORT 19876
+
+static volatile sig_atomic_t stop;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    stop = 1;
+}
 
 int main(void)
 {
@@ -20,8 +29,12 @@ int main(void)
     struct bpf_link *link = NULL;
     __u32 key = 0;
     __u64 val = 0;
+    __u64 prev_val = 0;
     int err, netns_fd;
-    int srv = -1, cli = -1;
+    int srv = -1, cli = -1, acc = -1;
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Загрузка */
     skel = sk_lookup_bpf__open_and_load();
@@ -77,6 +90,16 @@ int main(void)
     connect(cli, (struct sockaddr *)&addr, sizeof(addr));
     printf("  [TRIGGER] OK\n");
 
+    acc = accept(srv, NULL, NULL);
+    if (acc >= 0) {
+        close(acc);
+        acc = -1;
+    }
+    if (cli >= 0) {
+        close(cli);
+        cli = -1;
+    }
+
     usleep(100000);
 
     /* Проверка счётчика */
@@ -88,6 +111,20 @@ int main(void)
     }
 
 out:
+    printf("  [RUN] Программа активна. Нажмите Ctrl+C для остановки.\n");
+    while (!stop) {
+        err = bpf_map__lookup_elem(skel->maps.lookup_count, &key, sizeof(key), &val, sizeof(val), 0);
+        if (err == 0) {
+            unsigned long long delta = (unsigned long long)(val - prev_val);
+            printf("  [RT] lookup_count=%llu (+%llu)\n",
+                   (unsigned long long)val, delta);
+            prev_val = val;
+        } else {
+            printf("  [RT] WARN: не удалось прочитать счётчик (%d)\n", err);
+        }
+        sleep(1);
+    }
+
     if (cli >= 0) close(cli);
     if (srv >= 0) close(srv);
     if (link) bpf_link__destroy(link);

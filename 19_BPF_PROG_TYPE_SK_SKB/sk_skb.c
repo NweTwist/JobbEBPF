@@ -6,11 +6,20 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "sk_skb.skel.h"
 
 #define TEST_PORT 18919
+
+static volatile sig_atomic_t stop;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    stop = 1;
+}
 
 /* Создание пары TCP-сокетов через loopback */
 static int create_tcp_pair(int *cli_fd, int *acc_fd)
@@ -53,8 +62,12 @@ int main(void)
     struct sk_skb_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
+    __u64 prev_val = 0;
     int err, prog_fd, sockmap_fd;
     int cli_fd = -1, acc_fd = -1;
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Загрузка */
     skel = sk_skb_bpf__open_and_load();
@@ -113,6 +126,28 @@ int main(void)
         printf("  [VERIFY] PASS (counter=%llu)\n", (unsigned long long)val);
     } else {
         printf("  [VERIFY] FAIL (counter=%llu, err=%d)\n", (unsigned long long)val, err);
+    }
+
+    printf("  [RUN] Программа активна. Нажмите Ctrl+C для остановки.\n");
+    while (!stop) {
+        char rt_buf[64] = "rt_sk_skb";
+        if (send(cli_fd, rt_buf, sizeof(rt_buf), 0) < 0) {
+            fprintf(stderr, "  [RT] WARN: send: %s\n", strerror(errno));
+        } else {
+            recv(acc_fd, rt_buf, sizeof(rt_buf), 0);
+        }
+
+        err = bpf_map__lookup_elem(skel->maps.skb_count, &key, sizeof(key), &val, sizeof(val), 0);
+        if (err == 0) {
+            unsigned long long delta = (unsigned long long)(val - prev_val);
+            printf("  [RT] skb_count=%llu (+%llu)\n",
+                   (unsigned long long)val, delta);
+            prev_val = val;
+        } else {
+            printf("  [RT] WARN: не удалось прочитать счётчик (%d)\n", err);
+        }
+
+        sleep(1);
     }
 
 out:

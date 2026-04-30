@@ -4,16 +4,29 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#include <signal.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "raw_tp_sched.skel.h"
+
+static volatile sig_atomic_t stop;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    stop = 1;
+}
 
 int main(void)
 {
     struct raw_tp_sched_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
+    __u64 prev_val = 0;
     int err;
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Загрузка */
     skel = raw_tp_sched_bpf__open_and_load();
@@ -44,6 +57,20 @@ int main(void)
         printf("  [VERIFY] FAIL (counter=%llu)\n", (unsigned long long)val);
         raw_tp_sched_bpf__destroy(skel);
         return 1;
+    }
+
+    printf("  [RUN] Программа активна. Нажмите Ctrl+C для остановки.\n");
+    while (!stop) {
+        err = bpf_map__lookup_elem(skel->maps.sched_count, &key, sizeof(key), &val, sizeof(val), 0);
+        if (err == 0) {
+            unsigned long long delta = (unsigned long long)(val - prev_val);
+            printf("  [RT] sched_count=%llu (+%llu)\n",
+                   (unsigned long long)val, delta);
+            prev_val = val;
+        } else {
+            printf("  [RT] WARN: не удалось прочитать счётчик (%d)\n", err);
+        }
+        sleep(1);
     }
 
     raw_tp_sched_bpf__destroy(skel);

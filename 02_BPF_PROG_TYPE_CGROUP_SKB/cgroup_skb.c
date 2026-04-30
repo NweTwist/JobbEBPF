@@ -4,9 +4,18 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "cgroup_skb.skel.h"
+
+static volatile sig_atomic_t stop;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    stop = 1;
+}
 
 int main(void)
 {
@@ -15,7 +24,11 @@ int main(void)
     int cg_fd = -1;
     __u32 key = 0;
     __u64 val = 0;
+    __u64 prev_val = 0;
     int err;
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Load */
     skel = cgroup_skb_bpf__open_and_load();
@@ -56,6 +69,21 @@ int main(void)
         close(cg_fd);
         cgroup_skb_bpf__destroy(skel);
         return 1;
+    }
+
+    printf("  [RUN] Программа активна. Нажмите Ctrl+C для остановки.\n");
+    while (!stop) {
+        err = bpf_map__lookup_elem(skel->maps.egress_count,
+                                   &key, sizeof(key), &val, sizeof(val), 0);
+        if (err == 0) {
+            unsigned long long delta = (unsigned long long)(val - prev_val);
+            printf("  [RT] egress_count=%llu (+%llu)\n",
+                   (unsigned long long)val, delta);
+            prev_val = val;
+        } else {
+            printf("  [RT] WARN: не удалось прочитать счётчик (%d)\n", err);
+        }
+        sleep(1);
     }
 
     /* Cleanup */

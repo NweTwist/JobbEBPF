@@ -6,9 +6,18 @@
 #include <string.h>
 #include <linux/perf_event.h>
 #include <sys/syscall.h>
+#include <signal.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "perf_event.skel.h"
+
+static volatile sig_atomic_t stop;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    stop = 1;
+}
 
 static int perf_event_open(struct perf_event_attr *attr, pid_t pid,
                            int cpu, int group_fd, unsigned long flags)
@@ -22,7 +31,11 @@ int main(void)
     struct bpf_link *link = NULL;
     __u32 key = 0;
     __u64 val = 0;
+    __u64 prev_val = 0;
     int err, pmu_fd;
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Загрузка */
     skel = perf_event_bpf__open_and_load();
@@ -76,7 +89,22 @@ int main(void)
         return 1;
     }
 
+    printf("  [RUN] Программа активна. Нажмите Ctrl+C для остановки.\n");
+    while (!stop) {
+        err = bpf_map__lookup_elem(skel->maps.perf_count, &key, sizeof(key), &val, sizeof(val), 0);
+        if (err == 0) {
+            unsigned long long delta = (unsigned long long)(val - prev_val);
+            printf("  [RT] perf_count=%llu (+%llu)\n",
+                   (unsigned long long)val, delta);
+            prev_val = val;
+        } else {
+            printf("  [RT] WARN: не удалось прочитать счётчик (%d)\n", err);
+        }
+        sleep(1);
+    }
+
     bpf_link__destroy(link);
+    close(pmu_fd);
     perf_event_bpf__destroy(skel);
     printf("  [CLEANUP] OK\n");
     return 0;

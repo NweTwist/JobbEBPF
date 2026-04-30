@@ -7,19 +7,32 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "sk_reuseport.skel.h"
 
 #define TEST_PORT 19877
 
+static volatile sig_atomic_t stop;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    stop = 1;
+}
+
 int main(void)
 {
     struct sk_reuseport_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
+    __u64 prev_val = 0;
     int err, prog_fd;
     int s1 = -1, s2 = -1, cli = -1;
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Загрузка */
     skel = sk_reuseport_bpf__open_and_load();
@@ -80,6 +93,11 @@ int main(void)
     connect(cli, (struct sockaddr *)&addr, sizeof(addr));
     printf("  [TRIGGER] OK\n");
 
+    if (cli >= 0) {
+        close(cli);
+        cli = -1;
+    }
+
     usleep(100000);
 
     /* Проверка счётчика */
@@ -88,6 +106,20 @@ int main(void)
         printf("  [VERIFY] PASS (counter=%llu)\n", (unsigned long long)val);
     } else {
         printf("  [VERIFY] FAIL (counter=%llu, err=%d)\n", (unsigned long long)val, err);
+    }
+
+    printf("  [RUN] Программа активна. Нажмите Ctrl+C для остановки.\n");
+    while (!stop) {
+        err = bpf_map__lookup_elem(skel->maps.reuseport_count, &key, sizeof(key), &val, sizeof(val), 0);
+        if (err == 0) {
+            unsigned long long delta = (unsigned long long)(val - prev_val);
+            printf("  [RT] reuseport_count=%llu (+%llu)\n",
+                   (unsigned long long)val, delta);
+            prev_val = val;
+        } else {
+            printf("  [RT] WARN: не удалось прочитать счётчик (%d)\n", err);
+        }
+        sleep(1);
     }
 
 out:
