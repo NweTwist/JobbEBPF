@@ -726,19 +726,21 @@ fn run_shell_and_stream(
     command: &str,
     step: Option<&'static str>,
 ) -> anyhow::Result<CommandResult> {
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg(command)
-        .current_dir(current_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .pre_exec(|| {
-            unsafe {
-                libc::setpgid(0, 0);
-            }
-            Ok(())
-        })
-        .spawn()
+    let mut child = unsafe {
+        Command::new("bash")
+            .arg("-lc")
+            .arg(command)
+            .current_dir(current_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .pre_exec(|| {
+                unsafe {
+                    libc::setpgid(0, 0);
+                }
+                Ok(())
+            })
+            .spawn()
+    }
         .with_context(|| format!("spawn command: {}", command))?;
 
     let stdout = child.stdout.take().context("capture stdout")?;
@@ -900,19 +902,21 @@ fn start_background_trace(
         .with_context(|| format!("create {}", state.trace_log.display()))?;
     let log_writer = Arc::new(Mutex::new(std::io::BufWriter::new(log_file)));
 
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg(&config.trace_cmd)
-        .current_dir(current_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .pre_exec(|| {
-            unsafe {
-                libc::setpgid(0, 0);
-            }
-            Ok(())
-        })
-        .spawn()
+    let mut child = unsafe {
+        Command::new("bash")
+            .arg("-lc")
+            .arg(&config.trace_cmd)
+            .current_dir(current_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .pre_exec(|| {
+                unsafe {
+                    libc::setpgid(0, 0);
+                }
+                Ok(())
+            })
+            .spawn()
+    }
         .with_context(|| format!("start trace via: {}", config.trace_cmd))?;
 
     let pid = child.id();
