@@ -63,7 +63,18 @@ fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
-    let mut app = ui::App::new(repo_root, programs, trace_cmd, artifacts_dir, tx);
+    runner::spawn_global_trace(
+        tx.clone(),
+        trace_cmd.clone(),
+        artifacts_dir.clone(),
+    );
+
+    let mut app = ui::App::new(
+        repo_root,
+        programs,
+        artifacts_dir,
+        tx,
+    );
 
     let res = run_app(&mut terminal, &mut app, rx);
 
@@ -165,8 +176,6 @@ fn run_app(
                     KeyCode::Char('r') => app.run_selected(),
                     KeyCode::Char('b') => app.build_selected(),
                     KeyCode::Char('l') => app.load_selected(),
-                    KeyCode::Char('x') => app.start_trace_selected(),
-                    KeyCode::Char('z') => app.stop_trace_selected(),
                     KeyCode::Char('t') => app.test_selected(),
                     KeyCode::Char('u') => app.unload_selected(),
                     KeyCode::Char('a') => app.run_all(),

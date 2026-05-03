@@ -4,12 +4,13 @@ use chrono::Local;
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc,
-        Arc,
+        Arc, Mutex,
     },
     thread,
 };
@@ -29,16 +30,12 @@ pub enum RunnerEvent {
     Status { index: usize, status: ProgramStatus },
     Message { text: String },
     LogLine { index: usize, line: String },
-    ModuleState {
-        index: usize,
-        attached: Option<bool>,
-        trace_active: Option<bool>,
-    },
+    TraceLine { line: String },
+    ModuleState { index: usize, attached: Option<bool> },
 }
 
 #[derive(Clone, Debug)]
 pub struct RunConfig {
-    pub trace_cmd: String,
     pub artifacts_dir: PathBuf,
 }
 
@@ -49,8 +46,6 @@ pub enum RunAction {
     Load,
     Test,
     Unload,
-    TraceStart,
-    TraceStop,
 }
 
 impl RunAction {
@@ -61,8 +56,6 @@ impl RunAction {
             RunAction::Load => "load",
             RunAction::Test => "test",
             RunAction::Unload => "unload",
-            RunAction::TraceStart => "trace-start",
-            RunAction::TraceStop => "trace-stop",
         }
     }
 }
@@ -238,19 +231,7 @@ fn run_pipeline(
         } else if let Err(err) = run_step(tx, stop_flag, index, program, "load", &scripts.load, &out_dir) {
             Err(err)
         } else {
-            tx.send(RunnerEvent::Status {
-                index,
-                status: ProgramStatus::Running("trace+test"),
-            })
-            .ok();
-
-            let mut trace_child = match start_trace(&config.trace_cmd, &out_dir) {
-                Ok(child) => child,
-                Err(err) => return Err(err),
-            };
             let test_res = run_step(tx, stop_flag, index, program, "test", &scripts.test, &out_dir);
-            stop_trace(&mut trace_child);
-
             // try unload even if test failed
             let unload_res = run_step(tx, stop_flag, index, program, "unload", &scripts.unload, &out_dir);
 
@@ -334,7 +315,6 @@ fn run_manual_action(
             tx.send(RunnerEvent::ModuleState {
                 index,
                 attached: Some(true),
-                trace_active: None,
             })
             .ok();
             tx.send(RunnerEvent::Status {
@@ -360,15 +340,6 @@ fn run_manual_action(
             .ok();
         }
         RunAction::Unload => {
-            let _ = stop_background_trace(
-                tx,
-                stop_flag,
-                index,
-                &program.dir,
-                &state,
-                &out_dir.join("manual_trace_stop.log"),
-            );
-
             run_step_to_log(
                 tx,
                 stop_flag,
@@ -382,42 +353,6 @@ fn run_manual_action(
             tx.send(RunnerEvent::ModuleState {
                 index,
                 attached: Some(false),
-                trace_active: Some(false),
-            })
-            .ok();
-            tx.send(RunnerEvent::Status {
-                index,
-                status: ProgramStatus::Success,
-            })
-            .ok();
-        }
-        RunAction::TraceStart => {
-            start_background_trace(tx, stop_flag, index, &program.dir, config, &state)?;
-            tx.send(RunnerEvent::ModuleState {
-                index,
-                attached: None,
-                trace_active: Some(true),
-            })
-            .ok();
-            tx.send(RunnerEvent::Status {
-                index,
-                status: ProgramStatus::Success,
-            })
-            .ok();
-        }
-        RunAction::TraceStop => {
-            stop_background_trace(
-                tx,
-                stop_flag,
-                index,
-                &program.dir,
-                &state,
-                &out_dir.join("manual_trace_stop.log"),
-            )?;
-            tx.send(RunnerEvent::ModuleState {
-                index,
-                attached: None,
-                trace_active: Some(false),
             })
             .ok();
             tx.send(RunnerEvent::Status {
@@ -434,93 +369,19 @@ fn run_manual_action(
     Ok(())
 }
 
-fn start_background_trace(
-    tx: &mpsc::Sender<RunnerEvent>,
-    stop_flag: &AtomicBool,
-    index: usize,
-    current_dir: &Path,
-    config: &RunConfig,
-    state: &ModuleStateFiles,
-) -> anyhow::Result<()> {
-    tx.send(RunnerEvent::Status {
-        index,
-        status: ProgramStatus::Running("trace"),
-    })
-    .ok();
-
-    let trace_log = state.trace_log.display();
-    let pid_file = state.trace_pid.display();
-    let cmd = format!(
-        "rm -f '{pid}'; ({trace}) >> '{log}' 2>/dev/null & echo $! > '{pid}'",
-        pid = pid_file,
-        trace = config.trace_cmd,
-        log = trace_log,
-    );
-
-    let result = run_shell_and_stream(tx, stop_flag, index, current_dir, &cmd, Some("trace"))?;
-    fs::write(&state.trace_start_log, result.output.as_bytes())
-        .with_context(|| format!("write {}", state.trace_start_log.display()))?;
-
-    if !result.success {
-        return Err(anyhow!(
-            "trace-start failed (see {})",
-            state.trace_start_log.display()
-        ));
+fn kill_process_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGTERM);
     }
-
-    tx.send(RunnerEvent::Message {
-        text: format!("trace started -> {}", state.trace_log.display()),
-    })
-    .ok();
-
-    Ok(())
 }
 
-fn stop_background_trace(
-    tx: &mpsc::Sender<RunnerEvent>,
-    stop_flag: &AtomicBool,
-    index: usize,
-    current_dir: &Path,
-    state: &ModuleStateFiles,
-    stop_log: &Path,
-) -> anyhow::Result<()> {
-    tx.send(RunnerEvent::Status {
-        index,
-        status: ProgramStatus::Running("trace-stop"),
-    })
-    .ok();
-
-    let pid_file = state.trace_pid.display();
-    let cmd = format!(
-        "if [ -f '{pid}' ]; then kill \"$(cat '{pid}')\" 2>/dev/null || true; rm -f '{pid}'; fi",
-        pid = pid_file,
-    );
-
-    let result = run_shell_and_stream(
-        tx,
-        stop_flag,
-        index,
-        current_dir,
-        &cmd,
-        Some("trace-stop"),
-    )?;
-    fs::write(stop_log, result.output.as_bytes())
-        .with_context(|| format!("write {}", stop_log.display()))?;
-
-    if !result.success {
-        return Err(anyhow!("trace-stop failed (see {})", stop_log.display()));
-    }
-
-    tx.send(RunnerEvent::Message {
-        text: "trace stopped".to_string(),
-    })
-    .ok();
-
-    Ok(())
-}
 
 fn send_log_line(tx: &mpsc::Sender<RunnerEvent>, index: usize, line: String) {
     let _ = tx.send(RunnerEvent::LogLine { index, line });
+}
+
+fn send_trace_line(tx: &mpsc::Sender<RunnerEvent>, line: String) {
+    let _ = tx.send(RunnerEvent::TraceLine { line });
 }
 
 fn write_status_summary(
@@ -768,18 +629,12 @@ fn run_step_to_log(
 
 struct ModuleStateFiles {
     attached_flag: PathBuf,
-    trace_pid: PathBuf,
-    trace_log: PathBuf,
-    trace_start_log: PathBuf,
 }
 
 impl ModuleStateFiles {
     fn new(out_dir: &Path) -> Self {
         Self {
             attached_flag: out_dir.join(".attached"),
-            trace_pid: out_dir.join(".trace.pid"),
-            trace_log: out_dir.join("manual_trace.log"),
-            trace_start_log: out_dir.join("manual_trace_start.log"),
         }
     }
 
@@ -803,12 +658,19 @@ fn run_shell_and_stream(
     command: &str,
     step: Option<&'static str>,
 ) -> anyhow::Result<CommandResult> {
-    let mut child = Command::new("bash")
-        .arg("-lc")
+    let mut cmd = Command::new("bash");
+    cmd.arg("-lc")
         .arg(command)
         .current_dir(current_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn command: {}", command))?;
 
@@ -854,6 +716,7 @@ fn run_shell_and_stream(
 
     let mut collected = String::new();
     let mut killed_by_stop = false;
+    let child_pid = child.id();
     let success;
 
     loop {
@@ -872,7 +735,7 @@ fn run_shell_and_stream(
 
         if stop_flag.load(Ordering::Relaxed) {
             killed_by_stop = true;
-            let _ = child.kill();
+            kill_process_group(child_pid);
         }
 
         if let Some(status) = child.try_wait().context("wait command status")? {
@@ -908,6 +771,118 @@ fn run_shell_and_stream(
     })
 }
 
+pub fn spawn_global_trace(
+    tx: mpsc::Sender<RunnerEvent>,
+    trace_cmd: String,
+    artifacts_dir: PathBuf,
+) {
+    thread::spawn(move || {
+        if let Err(err) = fs::create_dir_all(&artifacts_dir) {
+            let _ = tx.send(RunnerEvent::Message {
+                text: format!("trace: failed to create artifacts dir: {}", err),
+            });
+            return;
+        }
+
+        let log_path = artifacts_dir.join("trace_global.log");
+        let log_file = match fs::File::create(&log_path) {
+            Ok(f) => f,
+            Err(err) => {
+                let _ = tx.send(RunnerEvent::Message {
+                    text: format!("trace: failed to create log: {}", err),
+                });
+                return;
+            }
+        };
+
+        let log_writer = Arc::new(Mutex::new(std::io::BufWriter::new(log_file)));
+
+        let mut cmd = Command::new("bash");
+        cmd.arg("-lc")
+            .arg(&trace_cmd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(err) => {
+                let _ = tx.send(RunnerEvent::Message {
+                    text: format!("trace: failed to start: {}", err),
+                });
+                return;
+            }
+        };
+
+        let _ = tx.send(RunnerEvent::Message {
+            text: format!("trace started -> {}", log_path.display()),
+        });
+
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => return,
+        };
+        let stderr = match child.stderr.take() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let tx_out = tx.clone();
+        let log_out = log_writer.clone();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim_end_matches(['\r', '\n']);
+                        send_trace_line(&tx_out, trimmed.to_string());
+                        if let Ok(mut w) = log_out.lock() {
+                            let _ = writeln!(w, "{}", trimmed);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let tx_err = tx.clone();
+        let log_err = log_writer.clone();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim_end_matches(['\r', '\n']);
+                        let rendered = format!("[stderr] {}", trimmed);
+                        send_trace_line(&tx_err, rendered.clone());
+                        if let Ok(mut w) = log_err.lock() {
+                            let _ = writeln!(w, "{}", rendered);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let _ = child.wait();
+
+        let _ = tx.send(RunnerEvent::Message {
+            text: "trace stopped".to_string(),
+        });
+    });
+}
+
 fn format_line_for_status(step: Option<&'static str>, line: &str) -> String {
     match step {
         Some(s) => format!("[{}] {}", s, line),
@@ -920,26 +895,6 @@ struct CommandResult {
     success: bool,
 }
 
-fn start_trace(trace_cmd: &str, out_dir: &Path) -> anyhow::Result<Child> {
-    let log_path = out_dir.join("trace.log");
-    let file = fs::File::create(&log_path)
-        .with_context(|| format!("create trace log {}", log_path.display()))?;
-
-    let child = Command::new("bash")
-        .arg("-lc")
-        .arg(trace_cmd)
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("start trace via: {}", trace_cmd))?;
-
-    Ok(child)
-}
-
-fn stop_trace(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
 
 #[derive(Clone, Debug)]
 struct Scripts {

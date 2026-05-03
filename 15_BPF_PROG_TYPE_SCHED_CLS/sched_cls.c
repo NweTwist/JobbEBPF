@@ -5,12 +5,21 @@
 #include <errno.h>
 #include <string.h>
 #include <net/if.h>
+#include <signal.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "sched_cls.skel.h"
 #include "../common/keep_attached.h"
 
 #define PIN_PATH "/sys/fs/bpf/_test_sched_cls"
+
+static volatile sig_atomic_t stop;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    stop = 1;
+}
 
 static void cleanup(struct sched_cls_bpf *skel)
 {
@@ -28,7 +37,11 @@ int main(int argc, char **argv)
     struct sched_cls_bpf *skel;
     __u32 key = 0;
     __u64 val = 0;
+    __u64 prev_val = 0;
     int err, prog_fd;
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     /* Загрузка */
     skel = sched_cls_bpf__open_and_load();
@@ -70,6 +83,20 @@ int main(int argc, char **argv)
         printf("  [VERIFY] PASS (counter=%llu)\n", (unsigned long long)val);
     } else {
         printf("  [VERIFY] FAIL (counter=%llu, err=%d)\n", (unsigned long long)val, err);
+    }
+
+    printf("  [RUN] Программа активна. Нажмите Ctrl+C для остановки.\n");
+    while (!stop) {
+        err = bpf_map__lookup_elem(skel->maps.cls_count, &key, sizeof(key), &val, sizeof(val), 0);
+        if (err == 0) {
+            unsigned long long delta = (unsigned long long)(val - prev_val);
+            printf("  [RT] cls_count=%llu (+%llu)\n",
+                   (unsigned long long)val, delta);
+            prev_val = val;
+        } else {
+            printf("  [RT] WARN: не удалось прочитать счётчик (%d)\n", err);
+        }
+        sleep(1);
     }
 
     /* Очистка */
